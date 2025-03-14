@@ -1,0 +1,831 @@
+---
+title: "Time Series Final Project"
+author: "Sophia Shi, Zhen Zhang, Enyu Wang"
+date: "2025-02-19"
+output:
+  html_document:
+    code_folding: show
+    highlight: haddock
+    number_sections: yes
+    theme: lumen
+    toc: yes
+    toc_depth: 4
+    toc_float: yes
+  pdf_document:
+    extra_dependencies: ["dcolumn"]
+    number_sections: yes
+    toc: yes
+    toc_depth: '4'
+  word_document:
+    toc: yes
+    toc_depth: '4'
+urlcolor: blue
+---
+
+```{r Setup, include=FALSE, results='hide', warning=FALSE}
+knitr::opts_chunk$set(echo = T, fig.width=8, fig.height=4)
+options(scipen = 0, digits = 3)  # controls base R output
+```
+
+# Setup and Data Preprocessing
+```{r}
+# Load required libraries
+library(readr)
+library(dplyr)
+library(lubridate)
+library(forecast)
+library(ggplot2)
+library(zoo)
+```
+
+```{r}
+# Load data
+store.data <- read_csv("~/Desktop/Notre/Time/project/retail_store_inventory.csv")
+
+# Daily time series
+daily_sum <- store.data %>%
+  group_by(Date) %>%
+  summarise(
+    Total_Units_Sold = sum(`Units Sold`, na.rm = TRUE)
+  ) %>%
+  ungroup()
+```
+
+```{r}
+# Aggregate daily to weekly time series
+weekly.store.ts <- ts(
+  daily_sum$Total_Units_Sold,
+  start = c(2022, 1),
+  end = c(2024, 1),
+  frequency = 52
+)
+
+autoplot(weekly.store.ts) + xlab("Time") + ylab("Total Units Sold")
+```
+
+```{r}
+# Data partitioning
+nValid <- 20
+nTrain <- length(weekly.store.ts) - nValid
+train.ts <- window(weekly.store.ts, start = c(2022, 1), end = c(2022, nTrain))
+valid.ts <- window(weekly.store.ts, start = c(2022, nTrain + 1), end = c(2022, nTrain + nValid))
+```
+
+# Random Walk Testing
+
+## ACF Plot
+```{r}
+# Autocorrelation Function (ACF) Plot of the entire series
+Acf(weekly.store.ts)
+```
+Conclusion: The data does not appear to be a random walk. 
+
+- Low Autocorrelation at Lag 1:
+
+In a random walk, the lag 1 autocorrelation should be very high (close to 1).
+In our plot, the lag 1 ACF is weak, suggesting the data is not following a typical random walk pattern.
+
+- No Slow Decay:
+
+A random walk shows a gradual decline in ACF across lags.
+Our ACF values quickly fall near zero, indicating a stationary process rather than a random walk.
+
+- Insignificant Lags:
+
+Most lags fall within the blue confidence bounds, suggesting no strong autocorrelation. If the data were a random walk, significant autocorrelations would persist across many lags.
+
+## ACF Plot After Differencing
+```{r}
+diff_store <- diff(weekly.store.ts)
+Acf(diff_store)
+```
+
+## ADF Test
+```{r}
+library(tseries)
+adf.test(weekly.store.ts)
+```
+Since our p value is below o.05 we reject the null hypothesis, so our original data is already stationary.
+
+## Arima Test
+```{r}
+arima(weekly.store.ts, order = c(1,0,0))
+```
+Double checking using AR(1) model fit, we can see that our ar1 value is 0.027, which is a very week autocorrelation.
+
+# Simple Forecast
+
+## Model 1: Average Method
+```{r}
+# the forecast is equal for all future values and it is equal to the average of the historical (training) data.
+average.forecast <- meanf(train.ts, h = nValid)
+average.forecast
+```
+
+## Model 2: Naive k-step ahead Method
+```{r}
+# all the forecasts are just the last observation
+naive.forecast <- naive(train.ts, h = nValid)
+naive.forecast
+```
+
+## Model 3: Drift Method
+```{r}
+# This is similar to drawina a line between first and last observation and extrapolating it into the future
+drift.forecast <- rwf(train.ts, h = nValid, drift=TRUE)
+drift.forecast
+```
+
+## Model 4: Seasonal Naive k-step ahead Method
+```{r}
+seasonal.naive.forecast <- snaive(train.ts, h = nValid) 
+seasonal.naive.forecast
+```
+
+## Putting them together and plot
+```{r}
+autoplot(train.ts) + 
+  autolayer(average.forecast, series = "Average", PI = FALSE) +
+  autolayer(naive.forecast, series = "Naive", PI = FALSE) + 
+  autolayer(drift.forecast, series = "Drift", PI = FALSE) +
+  autolayer(seasonal.naive.forecast, series = "Seasonal naive", PI = FALSE) + 
+  autolayer(valid.ts, series = "Observed") +
+  xlab("Time") + ylab("Total Units Sold") + 
+  guides(color = guide_legend(title = "Forecast"))
+```
+
+## Compare Accuracy of Simple Forecast Models
+```{r}
+accuracy(average.forecast$mean, valid.ts)
+accuracy(naive.forecast$mean, valid.ts)
+accuracy(drift.forecast$mean, valid.ts)
+accuracy(seasonal.naive.forecast$mean, valid.ts)
+```
+
+# Regression-Based Forecasting
+
+## Model 5: Linear Trend
+```{r}
+linear_mod <- tslm(train.ts ~ trend)
+linear_mod_pred <- forecast(linear_mod, h= nValid, level = 95)
+
+autoplot(linear_mod_pred) +
+  autolayer(linear_mod_pred$mean, series ="Linear Forecast") +
+  autolayer(linear_mod$fitted.values, series = "Linear Fit") + 
+  autolayer(valid.ts, series = "Observed") + 
+  xlab("Time") + ylab("Total Units Sold") + 
+  guides(color = guide_legend(title = ""))
+
+# We see that the linear_mod does not perform well due to the fact that it didn’t capture seasonality. We will build on seasonality in a later model.
+```
+
+## Model 6: Exponential Trend Model
+```{r}
+# We explore exponential trend regression-based time series forecasting if y_t follows exponential trend, then log(y_t) follows a linear trend
+exp_mod <- tslm(train.ts ~ trend , lambda = 0) #lambda = 0 indicates exponential trend
+exp_mod_pred <- forecast(exp_mod, h= nValid, level=0)
+
+autoplot(exp_mod_pred) +
+  autolayer(exp_mod_pred$mean, series="Exponential Forecast") +
+  autolayer(linear_mod_pred$mean, series = "Linear Forecast") + 
+  autolayer(valid.ts, series = "Observed") + 
+  guides(color = guide_legend(title = ""))
+```
+
+## Model 7: Quadratic Trend Model
+```{r}
+# Now, we build a regression-based model that captures quadratic trend
+quad_mod <- tslm(train.ts ~ trend + I(trend^2))
+quad_mod_pred <- forecast(quad_mod, h= nValid, level=0)
+
+autoplot(quad_mod_pred) +
+  autolayer(quad_mod_pred$mean, series ="Quadratic Forecast") +
+  autolayer(exp_mod_pred$mean, series="Exponential Forecast") +
+  autolayer(linear_mod_pred$mean, series = "Linear Forecast") + 
+  autolayer(valid.ts, series = "Observed") + 
+  autolayer(quad_mod$fitted.values, series = "Quadratic Fit") +
+  guides(color = guide_legend(title = ""))
+```
+
+## Model 8: Additive Seasonality and Linear Trend
+```{r}
+# Now, we build a regression-based model that capture both trend and seasonality.
+linear_season_mod <- tslm(train.ts ~ trend + season)
+linear_season_mod_pred <- forecast(linear_season_mod, h= nValid, level = 0)
+
+autoplot(linear_season_mod_pred) + 
+  autolayer(linear_season_mod_pred$mean, series = "Linear and Seasonality Forecast") +
+  #autolayer(season_mod_pred$mean, series ="Seasonality Forecast") +
+  #autolayer(quad_mod_pred$mean, series ="Quadratic Forecast") +
+  #autolayer(exp_mod_pred$mean, series="Exponential Forecast") +
+  #autolayer(linear_mod_pred$mean, series = "Linear Forecast") + 
+  autolayer(valid.ts, series = "Observed") + 
+  #autolayer(linear_season_mod$fitted.values, series = "Seasonality Fit") +
+  guides(color = guide_legend(title = ""))
+```
+
+## Model 9: Additive Seasonality and Quadratic Trend
+```{r}
+# We now consider poly_season_mod that capture seasonality and polynomial trend
+poly_season_mod <- tslm(train.ts ~ trend + I(trend^2)+ season)
+poly_season_mod_pred <- forecast(poly_season_mod, h= nValid, level = 0)
+
+autoplot(poly_season_mod_pred) + 
+  autolayer(poly_season_mod_pred$mean, series = "Quadratic and Seasonality Forecast") +
+  autolayer(linear_season_mod_pred$mean, series = "Linear and Seasonality Forecast") +
+  #autolayer(season_mod_pred$mean, series ="Seasonality Forecast") +
+  #autolayer(quad_mod_pred$mean, series ="Quadratic Forecast") +
+  #autolayer(exp_mod_pred$mean, series="Exponential Forecast") +
+  #autolayer(linear_mod_pred$mean, series = "Linear Forecast") + 
+  autolayer(valid.ts, series = "Observed") + 
+  #autolayer(poly_season_mod$fitted.values, series = "Quadratic and Seasonality Fit") +
+  guides(color = guide_legend(title = ""))
+```
+
+## Compare Accuracy of Regression-based Models
+```{r}
+accuracy(linear_mod_pred$mean, valid.ts)
+accuracy(exp_mod_pred$mean, valid.ts)
+accuracy(quad_mod_pred$mean, valid.ts)
+accuracy(linear_season_mod_pred$mean, valid.ts)
+accuracy(poly_season_mod_pred$mean, valid.ts)
+```
+
+# Smoothing Methods
+
+## Data Visualization with Moving Averages
+```{r}
+library(zoo)
+ma.trailing <- rollmean(weekly.store.ts, k = 12, align = "right")
+ma.centered <- ma(weekly.store.ts, order = 12)
+
+autoplot(weekly.store.ts)+
+  autolayer(ma.trailing, series = "Trailing Moving Average") +
+  autolayer(ma.centered, series = "Centered Moving Average") +
+  xlab("Time") + ylab("Total Units Sold") +
+  ggtitle("Total Units Sold with moving average w=12")
+```
+
+## Model 10: Moving averages Forecast
+```{r}
+ma.trailing <- rollmean(train.ts, k = 12, align = "right")
+last.ma <- tail(ma.trailing, 1)
+ma.trailing.pred <- ts(rep(last.ma, nValid), start = c(2022, nTrain + 1), 
+                       end = c(2022, nTrain + nValid), freq = 52)
+
+autoplot(weekly.store.ts)+
+  autolayer(ma.trailing, series = "Moving Average") +
+  autolayer(ma.trailing.pred, series = "MA Forecast")
+```
+
+## Model 11: Simple Exponential Smoothing (SES)
+```{r}
+lag1.diff <- diff(weekly.store.ts, lag = 1)
+lag12.diff <- diff(weekly.store.ts, lag = 12)
+
+diff.twice.ts <- diff(diff(weekly.store.ts, lag = 12), lag = 1)
+
+diff.nValid <- 20
+diff.nTrain <- length(diff.twice.ts) - diff.nValid
+diff.train.ts <- window(diff.twice.ts, start = c(2022, 1), end = c(2022, diff.nTrain + 1))
+diff.valid.ts <- window(diff.twice.ts, start = c(2022, diff.nTrain + 2), end = c(2022, diff.nTrain + 1 + diff.nValid))
+
+# ETS with Additive noise (A) and no trend (N) and no seasonality (N) is SES
+ses <- ets(diff.train.ts, model = "ANN", alpha = 0.2)
+ses.pred <- forecast(ses, h = diff.nValid, level = 90)
+
+# You also have dedicated function that can do this 
+# ses.pred <- ses(diff.train.ts, h = diff.nValid, alpha = 0.2)
+
+autoplot(ses.pred) + 
+  autolayer(ses.pred$fitted, series = "Fitted") + 
+  ylab("Total Units Sold") + xlab("Time")
+```
+
+## Model 12: Holt's Smoothing Methods (Double Exponential Smoothing)
+We perform forecasting with Holt’s method (only trend) and compare with regression model with only trend.
+```{r}
+# model "AAN" correspondes to additive error (A), additive trend (A) and no seasonality (N)
+holt.mod <- ets(train.ts, model = "AAN")
+holt.pred <- forecast(holt.mod, h = nValid, level = 0)
+
+# Plot two models: Holt method and Polynomial Trend
+autoplot(holt.pred) + 
+  autolayer(holt.pred$mean, series = "Holt's method") +
+  autolayer(quad_mod_pred$mean, series = "Regression (trend)") +
+  autolayer(valid.ts, series = "Observed")
+
+# Use Simple Exponential Smoothing (SES) - when no trend.
+# Use Holt's Method - when trend exists.
+```
+
+## IGNORE - Model 13: Holt-Winter's Exponential Smoothing Method (does not work for our data)
+```{r}
+# MMA means multiplicative error, additive trend, and additive seasonality. 
+# hwin <- ets(train.ts, model = "MAA")
+# hwin.pred <- forecast(hwin, h = nValid, level = 0)
+# 
+# autoplot(hwin.pred) + 
+#   autolayer(hwin.pred$mean, series = "Holt-Winter Forecast")+
+#   autolayer(valid.ts, series = "Observed")
+
+# This model does not work because frequency is too high (freq = 52). we can either remove trend (model = 'ANN') or reduce frequency (aggregate to monthly, freq = 12)
+```
+
+## IGNORE - Model 14: Automated method for Holt-Winters (doesn't work, same as holt-winters)
+Automation might not always be good. That is because the automated method chooses the best model fit for training data and may not do that well for validation data.
+```{r}
+# model = "ZZZ" is the default, but setting it here to explicitly realize that we are automating the error, trend and seasonality. 
+
+# ets.opt <- ets(train.ts, model = "ZZZ", restrict = FALSE, allow.multiplicative.trend = TRUE)
+# ets.opt.pred <- forecast(ets.opt, h = nValid, level = 0)
+```
+
+## Compare Accuracy of Smoothing Methods
+```{r}
+accuracy(ma.trailing.pred, valid.ts)
+accuracy(ses.pred$mean, valid.ts)
+accuracy(holt.pred$mean,valid.ts)
+```
+
+# ARIMA Models
+
+## Model 13: Basic Arima Model  
+```{r}
+# Basic ARIMA Model: (order = (1,1,1))
+p <- 1; d <- 1; q <- 1
+train.arima <- Arima(train.ts, order = c(p, d, q))
+arima.forecast <- forecast(train.arima, h = nValid)
+
+autoplot(arima.forecast) +
+  autolayer(valid.ts, series = "Observed") +
+  ggtitle("ARIMA Forecast (1,1,1)")
+```
+
+## Model 14: Auto Arima without Seasonality
+```{r}
+train.auto.arima.no.seas <- auto.arima(train.ts, seasonal = FALSE)
+arima.auto.forecast.no.seas <- forecast(train.auto.arima.no.seas, h = nValid)
+
+autoplot(arima.auto.forecast.no.seas) +
+  autolayer(valid.ts, series = "Observed") +
+  ggtitle("Auto ARIMA Forecast (No Seasonality)")
+```
+
+## Model 15: Auto Arima with Seasonality
+```{r}
+## Auto ARIMA with seasonality using seasonal dummies
+
+# Extract seasonal factors from the training set as a factor
+season <- as.factor(cycle(train.ts))
+
+# Convert the seasonal factor to dummy variables and remove one dummy to avoid collinearity
+xreg_train <- model.matrix(~ season)[, -1]
+
+# Fit the auto.arima model with the seasonal dummy variables as external regressors
+train.auto.arima <- auto.arima(train.ts, xreg = xreg_train)
+
+# Generate seasonal factors for the forecast period (ensure levels match the training set)
+future_season <- factor(rep(1:frequency(train.ts), length.out = nValid), levels = levels(season))
+xreg_future <- model.matrix(~ future_season)[, -1]
+
+# Forecast using the ARIMA model with seasonal dummy variables
+arima.auto.forecast <- forecast(train.auto.arima, xreg = xreg_future, h = nValid)
+
+# Plot the forecast along with the observed values
+autoplot(arima.auto.forecast) +
+  autolayer(valid.ts, series = "Observed") +
+  ggtitle("Auto ARIMA Forecast (With Seasonality)")
+```
+
+## Model 16: Arima with Regressors (Improved Polynomial with Seasonality)
+```{r}
+# Create regressors for the training data:
+# - 'trend_reg' is the time index,
+# - 'trend2_reg' is its square,
+# - and we convert the seasonal factor into dummy variables,
+#   setting levels explicitly and dropping one column to avoid collinearity.
+trend_reg <- as.numeric(time(train.ts))
+trend2_reg <- trend_reg^2
+
+# Set factor levels explicitly based on the frequency of the training series
+season_reg <- factor(cycle(train.ts), levels = as.character(1:frequency(train.ts)))
+dummy_train <- model.matrix(~ season_reg)[, -1]  # Remove one dummy column
+
+# Combine regressors into a single matrix for training
+xreg_train <- cbind(trend_reg, trend2_reg, dummy_train)
+
+# Fit the ARIMA model using the regressors (with seasonal = FALSE because seasonality is modeled via dummies)
+improved_poly_season_arima <- auto.arima(train.ts, xreg = xreg_train, seasonal = FALSE)
+
+# Generate future regressors for the forecast period:
+future_trend <- as.numeric(time(valid.ts))
+future_trend2 <- future_trend^2
+# Set the same factor levels for the future seasonal variable
+future_season <- factor(cycle(valid.ts), levels = levels(season_reg))
+dummy_future <- model.matrix(~ future_season)[, -1]  # Drop one column as before
+
+# Combine future regressors
+xreg_future <- cbind(future_trend, future_trend2, dummy_future)
+
+# Forecast using the fitted ARIMA model with the future regressors
+forecast_improved <- forecast(improved_poly_season_arima, xreg = xreg_future, h = nValid)
+
+# Plot the forecast along with the observed validation data
+autoplot(forecast_improved) +
+  autolayer(valid.ts, series = "Observed") +
+  ggtitle("ARIMA with Regressors (Improved Polynomial with Seasonality)")
+```
+
+## Compare Accuracy of Arima Models
+```{r}
+accuracy(arima.forecast$mean, valid.ts)
+accuracy(arima.auto.forecast.no.seas$mean, valid.ts)
+accuracy(arima.auto.forecast$mean, valid.ts)
+accuracy(forecast_improved$mean, valid.ts)
+```
+
+# Model 17: Neural Network Model
+```{r}
+# Set a random seed for reproducibility
+set.seed(123)
+
+# Create consistent seasonal dummy variables for both training and validation
+season_train <- factor(cycle(train.ts), levels = as.character(1:frequency(train.ts)))
+season_dummy_train <- model.matrix(~ season_train)[, -1]
+
+season_valid <- factor(cycle(valid.ts), levels = as.character(1:frequency(train.ts)))
+season_dummy_valid <- model.matrix(~ season_valid)[, -1]
+
+# Fit the neural network model with adjusted parameters:
+# size = 15: a larger hidden layer to capture more complex patterns
+# repeats = 50: more repeated trainings to stabilize the results
+# decay = 0.001: smaller decay (weaker regularization) to reduce over-smoothing
+nn_model_season <- nnetar(
+  y      = train.ts,
+  xreg   = season_dummy_train,
+  size   = 15,       # Increased number of hidden nodes
+  repeats = 50,      # Keep multiple repeats for stability
+  decay  = 0.001     # Reduced regularization
+)
+
+# Forecast using the fitted model and matching seasonal dummy variables for validation
+nn_forecast_season <- forecast(
+  nn_model_season,
+  xreg = season_dummy_valid,
+  h    = nValid
+)
+
+# Plot the forecast alongside the observed values in the validation set
+autoplot(nn_forecast_season) +
+  autolayer(valid.ts, series = "Observed") +
+  xlab("Time") +
+  ylab("Total Units Sold") +
+  ggtitle("Neural Network Forecast with Seasonal Dummies (Increased Size, Reduced Decay)") +
+  guides(color = guide_legend(title = "Series"))
+```
+
+## Accuracy of Neural Network Model
+```{r}
+accuracy(nn_forecast_season$mean, valid.ts)
+```
+
+# Model 18: Aggregate Multiple Forecasts - Combination
+```{r}
+# Make sure each of these is a valid forecast object with a $mean component
+model1.forecast <- arima.forecast                 # ARIMA(1,1,1)
+model2.forecast <- quad_mod_pred                  # Quadratic Trend
+model3.forecast <- ma.trailing.pred               # Moving Average
+model4.forecast <- average.forecast               # Average
+model5.forecast <- arima.auto.forecast.no.seas    # Auto ARIMA (No Seas)
+```
+
+```{r}
+# Suppose you have 5 forecast objects, each returned as a data frame
+# with columns: "Point Forecast", "Lo 80", "Hi 80", "Lo 95", "Hi 95"
+# We'll extract the "Point Forecast" column from each to get numeric vectors.
+
+# 1) Extract numeric vectors for each forecast's point predictions
+model1_vector <- model1.forecast$mean           # ARIMA
+model2_vector <- model2.forecast$mean           # Quadratic Trend
+model3_vector <- model3.forecast                # Moving Average (already numeric)
+model4_vector <- model4.forecast$mean           # Average Method
+model5_vector <- model5.forecast$mean 
+
+# 2) Verify that each vector is numeric and has the same length
+# You can check with str(model1_vector), length(model1_vector), etc.
+
+# 3) Compute a simple average of these 5 numeric vectors
+num.models <- 5
+comb.simple.avg <- (
+  model1_vector +
+  model2_vector +
+  model3_vector +
+  model4_vector +
+  model5_vector
+) / num.models
+
+# 4) Plot the training set, the averaged forecast, and the observed validation data
+# Adjust the code to match your actual variable names for train.ts and valid.ts
+autoplot(train.ts) +
+  autolayer(comb.simple.avg, series = "Simple Avg Comb") +
+  autolayer(valid.ts, series = "Observed") +
+  ggtitle("Combination of Top 5 Models - Simple Average (All Numeric)")
+```
+
+```{r}
+# Put each model's forecasted mean into a data frame
+forecast.vectors.df <- data.frame(
+  model1 = as.numeric(model1.forecast$mean),
+  model2 = as.numeric(model2.forecast$mean),
+  model3 = as.numeric(model3.forecast),
+  model4 = as.numeric(model4.forecast$mean),
+  model5 = as.numeric(model5.forecast$mean)
+)
+
+# Compute a 20% trimmed mean for each forecast horizon
+# With 5 models, this effectively removes the highest & lowest value each time step
+forecast.vectors.df$comb.trimmed.avg <- apply(
+  forecast.vectors.df,
+  1,
+  function(x) mean(x, trim = 0.2)
+)
+
+# Convert trimmed mean to a ts object (adjust start/frequency to your validation range)
+comb.trimmed.avg <- ts(
+  forecast.vectors.df$comb.trimmed.avg,
+  start = c(2023, 34),  # Example
+  frequency = 52       # Example for weekly data
+)
+
+# Plot: training set, trimmed average combo, and observed validation
+autoplot(train.ts) +
+  autolayer(comb.trimmed.avg, series = "Trimmed Avg Comb") +
+  autolayer(valid.ts, series = "Observed") +
+  ggtitle("Combination of Top 5 Models - Trimmed Mean")
+```
+
+```{r}
+# 1. Create a data frame of the 5 model forecasts
+forecast.vectors.df <- data.frame(
+  model1 = as.numeric(model1.forecast$mean),
+  model2 = as.numeric(model2.forecast$mean),
+  model3 = as.numeric(model3.forecast),
+  model4 = as.numeric(model4.forecast$mean),
+  model5 = as.numeric(model5.forecast$mean)
+)
+
+# 2. Add the validation data as the dependent variable
+forecast.vectors.df$valid <- as.numeric(valid.ts)
+
+# 3. Fit a linear model to find the best weights for each forecast
+forecasts.lm <- lm(valid ~ model1 + model2 + model3 + model4 + model5, data = forecast.vectors.df)
+summary(forecasts.lm)
+
+# 4. Convert fitted values into a ts object (regression-based combo)
+comb.regression <- ts(
+  forecasts.lm$fitted.values,
+  start = c(2023, 34),  # Example
+  frequency = 52       # Example for weekly data
+)
+
+# 5. Plot the training set, regression-based combo, and observed validation
+autoplot(train.ts) +
+  autolayer(comb.regression, series = "Regression-Based Comb") +
+  autolayer(valid.ts, series = "Observed") +
+  ggtitle("Combination of Top 5 Models - Regression Fit")
+```
+
+# Accuracy Comparison Among All Models
+
+## Accuracy Table
+```{r}
+# Compute accuracy for each model
+acc_avg       <- accuracy(average.forecast$mean, valid.ts)
+acc_naive     <- accuracy(naive.forecast$mean, valid.ts)
+acc_drift     <- accuracy(drift.forecast$mean, valid.ts)
+acc_snaive    <- accuracy(seasonal.naive.forecast$mean, valid.ts)
+acc_linear    <- accuracy(linear_mod_pred$mean, valid.ts)
+acc_exp       <- accuracy(exp_mod_pred$mean, valid.ts)
+acc_quad      <- accuracy(quad_mod_pred$mean, valid.ts)
+acc_lin_seas  <- accuracy(linear_season_mod_pred$mean, valid.ts)
+acc_poly_seas <- accuracy(poly_season_mod_pred$mean, valid.ts)
+acc_ma        <- accuracy(ma.trailing.pred, valid.ts)
+acc_ses       <- accuracy(ses.pred$mean, valid.ts)
+acc_holt      <- accuracy(holt.pred$mean, valid.ts)
+acc_arima     <- accuracy(arima.forecast$mean, valid.ts)
+acc_arima_ns  <- accuracy(arima.auto.forecast.no.seas$mean, valid.ts)
+acc_arima_s   <- accuracy(arima.auto.forecast$mean, valid.ts)
+acc_improved  <- accuracy(forecast_improved$mean, valid.ts)
+acc_nn        <- accuracy(nn_forecast_season$mean, valid.ts)
+acc_combsim   <- accuracy(comb.simple.avg, valid.ts)
+acc_combtrim  <- accuracy(comb.trimmed.avg, valid.ts)
+acc_combre    <- accuracy(comb.regression, valid.ts)
+
+# 2. Create a data frame of all the accuracy metrics of interest
+acc_table <- data.frame(
+  Model = c("Average",
+            "Naive",
+            "Drift",
+            "Seasonal Naive",
+            "Linear Trend",
+            "Exponential Trend",
+            "Quadratic Trend",
+            "Linear+Season",
+            "Poly+Season",
+            "Moving Average",
+            "SES",
+            "Holt",
+            "ARIMA(1,1,1)",
+            "Auto ARIMA (No Seas)",
+            "Auto ARIMA (Seas)",
+            "ARIMA + Regressors",
+            "NN + Seasonal Dummies",
+            "Forecast Combination simple",
+            "Forecast Combination trim",
+            "Forecast Combination regression"),
+  ME      = c(acc_avg[1, "ME"], 
+              acc_naive[1, "ME"], 
+              acc_drift[1, "ME"], 
+              acc_snaive[1, "ME"],
+              acc_linear[1, "ME"], 
+              acc_exp[1, "ME"], 
+              acc_quad[1, "ME"],
+              acc_lin_seas[1, "ME"],
+              acc_poly_seas[1, "ME"],
+              acc_ma[1, "ME"],
+              acc_ses[1, "ME"],
+              acc_holt[1, "ME"],
+              acc_arima[1, "ME"],
+              acc_arima_ns[1, "ME"],
+              acc_arima_s[1, "ME"],
+              acc_improved[1, "ME"],
+              acc_nn[1, "ME"],
+              acc_combsim[1, "ME"],
+              acc_combtrim[1, "ME"],
+              acc_combre[1, "ME"]),
+  RMSE    = c(acc_avg[1, "RMSE"], 
+              acc_naive[1, "RMSE"], 
+              acc_drift[1, "RMSE"], 
+              acc_snaive[1, "RMSE"],
+              acc_linear[1, "RMSE"], 
+              acc_exp[1, "RMSE"], 
+              acc_quad[1, "RMSE"],
+              acc_lin_seas[1, "RMSE"],
+              acc_poly_seas[1, "RMSE"],
+              acc_ma[1, "RMSE"],
+              acc_ses[1, "RMSE"],
+              acc_holt[1, "RMSE"],
+              acc_arima[1, "RMSE"],
+              acc_arima_ns[1, "RMSE"],
+              acc_arima_s[1, "RMSE"],
+              acc_improved[1, "RMSE"],
+              acc_nn[1, "RMSE"],
+              acc_combsim[1, "RMSE"],
+              acc_combtrim[1, "RMSE"],
+              acc_combre[1, "RMSE"]),
+  MAE     = c(acc_avg[1, "MAE"], 
+              acc_naive[1, "MAE"], 
+              acc_drift[1, "MAE"], 
+              acc_snaive[1, "MAE"],
+              acc_linear[1, "MAE"], 
+              acc_exp[1, "MAE"], 
+              acc_quad[1, "MAE"],
+              acc_lin_seas[1, "MAE"],
+              acc_poly_seas[1, "MAE"],
+              acc_ma[1, "MAE"],
+              acc_ses[1, "MAE"],
+              acc_holt[1, "MAE"],
+              acc_arima[1, "MAE"],
+              acc_arima_ns[1, "MAE"],
+              acc_arima_s[1, "MAE"],
+              acc_improved[1, "MAE"],
+              acc_nn[1, "MAE"],
+              acc_combsim[1, "MAE"],
+              acc_combtrim[1, "MAE"],
+              acc_combre[1, "MAE"]),
+  MPE     = c(acc_avg[1, "MPE"], 
+              acc_naive[1, "MPE"], 
+              acc_drift[1, "MPE"], 
+              acc_snaive[1, "MPE"],
+              acc_linear[1, "MPE"], 
+              acc_exp[1, "MPE"], 
+              acc_quad[1, "MPE"],
+              acc_lin_seas[1, "MPE"],
+              acc_poly_seas[1, "MPE"],
+              acc_ma[1, "MPE"],
+              acc_ses[1, "MPE"],
+              acc_holt[1, "MPE"],
+              acc_arima[1, "MPE"],
+              acc_arima_ns[1, "MPE"],
+              acc_arima_s[1, "MPE"],
+              acc_improved[1, "MPE"],
+              acc_nn[1, "MPE"],
+              acc_combsim[1, "MPE"],
+              acc_combtrim[1, "MPE"],
+              acc_combre[1, "MPE"]),
+  MAPE    = c(acc_avg[1, "MAPE"], 
+              acc_naive[1, "MAPE"], 
+              acc_drift[1, "MAPE"], 
+              acc_snaive[1, "MAPE"],
+              acc_linear[1, "MAPE"], 
+              acc_exp[1, "MAPE"], 
+              acc_quad[1, "MAPE"],
+              acc_lin_seas[1, "MAPE"],
+              acc_poly_seas[1, "MAPE"],
+              acc_ma[1, "MAPE"],
+              acc_ses[1, "MAPE"],
+              acc_holt[1, "MAPE"],
+              acc_arima[1, "MAPE"],
+              acc_arima_ns[1, "MAPE"],
+              acc_arima_s[1, "MAPE"],
+              acc_improved[1, "MAPE"],
+              acc_nn[1, "MAPE"],
+              acc_combsim[1, "MAPE"],
+              acc_combtrim[1, "MAPE"],
+              acc_combre[1, "MAPE"]))
+
+# 3. (Optional) Print the data frame
+acc_table 
+# 4. (Optional) If you're in an R Markdown, you can nicely display it as a table
+library(knitr)
+kable(acc_table, digits = 3, caption = "Accuracy Comparison of All Models")
+```
+
+## Accuracy Table - Ranked
+```{r}
+library(dplyr)
+
+acc_table_ranked <- acc_table %>%
+  arrange(MAPE) %>%           # sort by ascending MAPE
+  mutate(
+    Rank = row_number()       # add Rank column
+  )
+
+# Reset row names if you like
+row.names(acc_table_ranked) <- NULL
+acc_table_ranked
+
+# (Optional) If you're in an R Markdown, you can nicely display it as a table
+library(knitr)
+kable(acc_table_ranked, digits = 3, caption = "Accuracy Comparison of All Models")
+```
+
+# Final Model Forcast the Future
+
+## Rebuild Top5 Model Using Whole Dataset
+```{r}
+p <- 1; d <- 1; q <- 1
+whole.arima <- Arima(weekly.store.ts, order = c(p, d, q))
+arima.forecast1 <- forecast(whole.arima, h = 20)# ARIMA(1,1,1)
+
+quad_mod1 <- tslm(weekly.store.ts ~ trend + I(trend^2))
+quad_mod_pred1 <- forecast(quad_mod1, h= 20, level=0)                  # Quadratic Trend
+
+ma.trailing1 <- rollmean(weekly.store.ts, k = 12, align = "right")
+last.ma1 <- tail(ma.trailing1, 1)
+ma.trailing.pred1 <- ts(rep(last.ma1, 20), start = c(2024, 2),
+                       freq = 52)               # Moving Average
+
+average.forecast1 <- meanf(weekly.store.ts, h = nValid)               # Average
+
+train.auto.arima.no.seas1 <- auto.arima(weekly.store.ts, seasonal = FALSE)
+arima.auto.forecast.no.seas1 <- forecast(train.auto.arima.no.seas1, h = 20)
+```
+
+
+```{r}
+# 1. Create a data frame of the 5 model forecasts
+forecast.vectors.df <- data.frame(
+  model1 = as.numeric(arima.forecast1$mean),
+  model2 = as.numeric(quad_mod_pred1$mean),
+  model3 = as.numeric(ma.trailing.pred1),
+  model4 = as.numeric(average.forecast1$mean),
+  model5 = as.numeric(arima.auto.forecast.no.seas1$mean)
+)
+
+# 2. Add the validation data as the dependent variable
+# forecast.vectors.df$weekly <- as.numeric(weekly.store.ts)
+
+forecast.vectors.df$actual <- rowMeans(forecast.vectors.df[, c("model1", "model2", "model3", "model4", "model5")])
+
+# 3. Fit a linear model to find the best weights for each forecast
+forecasts.lm <- lm(actual ~ model1 + model2 + model3 + model4 + model5, data = forecast.vectors.df)
+
+summary(forecasts.lm)
+
+# 4. Convert fitted values into a ts object (regression-based combo)
+comb.regression <- ts(
+  forecasts.lm$fitted.values,
+  start = c(2024, 2),  # Example
+  frequency = 52       # Example for weekly data
+)
+
+# 5. Plot the training set, regression-based combo, and observed validation
+autoplot(weekly.store.ts) +
+  autolayer(comb.regression, series = "Regression-Based Comb") +
+  autolayer(valid.ts, series = "Observed") +
+  ggtitle("Combination of Top 5 Models - Regression Fit")
+```
+
+
